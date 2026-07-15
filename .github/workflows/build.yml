@@ -1,0 +1,38 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake python3 ${{ matrix.cc }}
+
+      # The register enums are generated from MESA at build time; sparse-checkout
+      # only the lan80xx source subtree the generator reads (regs_lan80xx_*.h +
+      # lan80xx_regs_util.h) from upstream MESA.
+      - name: Fetch MESA lan80xx register headers
+        uses: actions/checkout@v4
+        with:
+          repository: microchip-ung/mesa
+          path: mesa
+          sparse-checkout: mepa/microchip/lan80xx/src
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.cc }} -DMESA_ROOT_DIR="$PWD/mesa"
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"

@@ -17,6 +17,12 @@ if(SPIPROXY_SANITIZE AND SPIPROXY_STATIC)
     message(FATAL_ERROR "SPIPROXY_SANITIZE and SPIPROXY_STATIC are mutually exclusive")
 endif()
 
+set(MESA_ROOT_DIR "" CACHE PATH "Path to Microchip MESA source")
+
+if(NOT (MESA_ROOT_DIR AND IS_DIRECTORY "${MESA_ROOT_DIR}"))
+    message(FATAL_ERROR "invalid or missing MESA_ROOT_DIR")
+endif()
+
 # Default to an optimized build when none is chosen, so _FORTIFY_SOURCE
 # (below) is effective -- it is inert without -O1+.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -44,6 +50,22 @@ else()
         "$<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=2>")
 endif()
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+# Register enums are generated from MESA at build time, into the build tree so
+# the source stays clean and rebuilds stay incremental (consumers add the build
+# dir to their include path below).
+set(LAN80XX_REGS_H ${CMAKE_CURRENT_BINARY_DIR}/lan80xx_regs.h)
+add_custom_command(
+    OUTPUT ${LAN80XX_REGS_H}
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/gen_lan80xx_regs_header.py
+            ${MESA_ROOT_DIR} ${LAN80XX_REGS_H}
+    MAIN_DEPENDENCY ${CMAKE_CURRENT_SOURCE_DIR}/gen_lan80xx_regs_header.py
+    COMMENT "Generating MMD + register-address enums for lan80xx-spid")
+
+add_custom_target(gen_lan80xx_regs DEPENDS ${LAN80XX_REGS_H})
+
 # development package: the wire-protocol API/contract
 add_library(spiproxy INTERFACE)
 add_library(mepa_spidev_proxy::spiproxy ALIAS spiproxy)
@@ -56,9 +78,13 @@ install(TARGETS spiproxy EXPORT mepa_spidev_proxyTargets)
 
 # the spi proxy daemon + debug CLI
 add_executable(lan80xx_spid lan80xx_spid.c log.c parse.c)
+add_dependencies(lan80xx_spid gen_lan80xx_regs)
+target_include_directories(lan80xx_spid PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 set_target_properties(lan80xx_spid PROPERTIES OUTPUT_NAME "lan80xx-spid")
 
 add_executable(spiproxy_cli spiproxy_cli.c parse.c)
+add_dependencies(spiproxy_cli gen_lan80xx_regs)
+target_include_directories(spiproxy_cli PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 set_target_properties(spiproxy_cli PROPERTIES OUTPUT_NAME "spiproxy-cli")
 
 if (SPIPROXY_STATIC)
