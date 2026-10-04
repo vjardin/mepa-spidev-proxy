@@ -16,6 +16,7 @@ option(SPIPROXY_STATIC   "Link the executables statically" OFF)
 option(SPIPROXY_SANITIZE "Build with AddressSanitizer + UBSan (dev/CI)" OFF)
 option(SPIPROXY_FUZZ     "Build the libFuzzer request-parser harness (needs clang)" OFF)
 option(SPIPROXY_FUZZ_COVERAGE "Add clang source-coverage + a fuzz_coverage report target" OFF)
+option(SPIPROXY_TESTS    "Build the unit tests (ctest), no hardware needed" OFF)
 
 if(SPIPROXY_STATIC AND (SPIPROXY_SANITIZE OR SPIPROXY_FUZZ))
     message(FATAL_ERROR "SPIPROXY_STATIC is incompatible with SPIPROXY_SANITIZE / SPIPROXY_FUZZ")
@@ -93,6 +94,19 @@ add_executable(spiproxy_cli spiproxy_cli.c parse.c)
 add_dependencies(spiproxy_cli gen_lan80xx_regs)
 target_include_directories(spiproxy_cli PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 set_target_properties(spiproxy_cli PROPERTIES OUTPUT_NAME "spiproxy-cli")
+
+# Unit tests: like the fuzz harnesses they #include the daemon's sources with
+# SPIPROXY_FUZZ (no main, stub SPI backend), but run deterministic scripts.
+if(SPIPROXY_TESTS)
+    enable_testing()
+    add_executable(test_tsfifo test/test_tsfifo.c log.c parse.c)
+    add_dependencies(test_tsfifo gen_lan80xx_regs)
+    target_include_directories(test_tsfifo PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+    target_compile_definitions(test_tsfifo PRIVATE SPIPROXY_FUZZ)
+    target_compile_options(test_tsfifo PRIVATE -Wno-unused-function)
+    add_test(NAME tsfifo COMMAND test_tsfifo)
+endif()
 
 # Fuzzing targets (harness + optional coverage reports) -- see fuzz/fuzz.cmake.
 # The SPIPROXY_FUZZ[_COVERAGE] options + their global flag interactions are
