@@ -25,6 +25,10 @@ The clients get:
 - full MCU `MAILBOX` request/response runs;
 - a hardware `RESET` primitive (pulses a reset GPIO via the kernel GPIO v2
   chardev uAPI);
+- an egress timestamp FIFO service (`TSFIFO_SUB` / `TSFIFO_UNSUB`): the
+  daemon drains the transmit timestamp FIFO of a subscribed slice and pushes
+  its entries to the subscriber (a PTP stack), while no other client may read
+  the FIFO rows;
 - `STATS` / `TRACE` diagnostics, plus a cross-client "lint" layer that warns on
   page-ride, clear-on-read counter poaching, and RMW races.
 
@@ -65,6 +69,7 @@ Installing:
 | Option            | Default | Meaning                                                        |
 |-------------------|---------|----------------------------------------------------------------|
 | `SPIPROXY_STATIC` | `OFF`   | Fully static executables (for initramfs targets).              |
+| `SPIPROXY_TESTS`  | `OFF`   | Unit tests, run with `ctest` (no hardware needed).             |
 
 ```sh
 cmake -B build -S . -DSPIPROXY_STATIC=ON
@@ -116,6 +121,28 @@ spiproxy-cli write <slice> <mmd> <reg> <val>
 spiproxy-cli bench <n>            # proxied read round-trip stats
 spiproxy-cli hammer <seconds>     # low-priority read flood
 spiproxy-cli claimtest <ms>       # claim, read, hold, release
+spiproxy-cli tsfifo <slice> [period_us [count]]  # print the TS FIFO pushes
+```
+
+### Egress timestamp FIFO
+
+A PTP stack timestamping with the PHY in standalone mode gets the transmit
+timestamps (Sync in two-step, Delay_Req) from the egress TS FIFO of each slice.
+Reading `TSFIFO_9` pops a row, so the FIFO can have one reader only.
+
+- `TSFIFO_SUB {slice, period_us}` makes the daemon poll that FIFO every
+  `period_us` (default 5 ms, 1 ms .. 1 s)
+- Each poll that finds rows sends one push (`seq` = 0) with up to 16 entries
+  and the `EGR_TSFIFO_DROP_CNT` value, see `spiproxy.h`.
+- After a hardware `RESET`, subscribers get a reset notice: the TSU
+  configuration is gone and must be programmed again.
+- The drain runs between any two queued operations, during a mailbox wait and
+  while another client holds a `CLAIM`: PTP comes first.
+- Use a dedicated connection for the subscription.
+
+```sh
+cmake -B build -S . -DMESA_ROOT_DIR=<mesa> -DSPIPROXY_TESTS=ON
+cmake --build build && (cd build && ctest)
 ```
 
 See the header comment in `spiproxy_cli.c` for the complete subcommand list.
