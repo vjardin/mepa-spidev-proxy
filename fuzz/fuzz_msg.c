@@ -3,7 +3,7 @@
 //
 // libFuzzer harness for the lan80xx-spid request path.
 //
-// It #includes lan80xx_spid.c built with -DSPIPROXY_FUZZ, which drops main()
+// It #includes the daemon's sources with -DSPIPROXY_FUZZ, which drops main()
 // and swaps the SPI backend for a fuzzer-driven stub, giving this TU direct
 // access to the (static) daemon internals.
 //
@@ -28,6 +28,7 @@
 // handed to enqueue() directly).
 
 #include "lan80xx_spid.c"
+#include "ts_fifo.c"
 #include "fuzz_common.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)

@@ -35,6 +35,7 @@ The clients get:
 | Binary          | Source            | Role                                             |
 |-----------------|-------------------|--------------------------------------------------|
 | `lan80xx-spid`  | `lan80xx_spid.c`  | The daemon: owns `/dev/spidev`, serializes access|
+|                 | `ts_fifo.c`       | Its egress timestamp FIFO service                |
 | `spiproxy-cli`  | `spiproxy_cli.c`  | Debug CLI client                                 |
 | (shared header) | `spiproxy.h`      | Wire protocol contract (12-byte header + ops)    |
 

@@ -5,7 +5,7 @@
 // the ver / len-vs-bytecount / SPIPROXY_MSG_MAX validation that untrusted
 // client datagrams hit first (before the request handlers fuzz_msg covers).
 //
-// It #includes lan80xx_spid.c built with -DSPIPROXY_FUZZ (same hardware-free
+// It #includes the daemon's sources with -DSPIPROXY_FUZZ (same hardware-free
 // SPI stub and shared setup as fuzz_msg). Each input is a run of raw
 // datagrams, each a u16 length prefix followed by that many bytes handed
 // verbatim to client_frame() -- so the header (ver/type/flags/seq/len) is
@@ -14,6 +14,7 @@
 // dropped, matching fuzz_msg's teardown.
 
 #include "lan80xx_spid.c"
+#include "ts_fifo.c"
 #include "fuzz_common.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)

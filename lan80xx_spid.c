@@ -11,7 +11,7 @@
 // Single-threaded epoll loop, one SPI operation in flight at a time,
 // three priority queues (PTP > normal > debug), whole-device claims
 // with client-supplied cleanup ops, in-daemon pipelined reads, op-log
-// ring.
+// ring, egress timestamp FIFO drain with push to a subscriber.
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -39,6 +39,8 @@
 #include "lan80xx_regs.h"
 #include "log.h"
 #include "parse.h"
+#include "lan80xx_spid.h"
+#include "ts_fifo.h"
 
 #define MAX_CLIENTS    16
 #define MAX_QITEMS     256
@@ -46,7 +48,6 @@
 #define RD_RING_COUNT  16       /* rmw-race read-tracking ring depth      */
 #define TRACE_TAIL_MAX 64       /* trace entries returned by SPIPROXY_TRACE */
 #define TRACE_LINE_MAX 64       /* max bytes one trace line emits         */
-#define SLICE_COUNT    4        /* SPI slices per package (0..3)          */
 #define SIDE_COUNT     2        /* PHY sides: HOST / LINE                 */
 #define USEC_PER_SEC   1000000u
 #define SPI_BYTES      7        /* 3 address + 4 data                    */
@@ -81,17 +82,7 @@
 #define MB_POLL_DELAY_US  1000u   /* backoff between response-flag polls       */
 #endif
 
-#define COMM_PATH_MAX (20U)
 #define REG_NAME_BUF   32       /* reg_name() output buffer size          */
-
-typedef struct client {
-    int      fd;
-    int      used;
-    uint32_t id;
-    pid_t    pid;
-    char     comm[COMM_PATH_MAX];   /* /proc/<pid>/comm of the client process */
-    uint64_t n_ops, n_msgs, n_err;
-} client_t;
 
 typedef struct qitem {
     struct qitem *next;
@@ -158,14 +149,14 @@ static struct {
     volatile sig_atomic_t stop;
 } g;
 
-static uint64_t now_us(void)
+uint64_t now_us(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * USEC_PER_SEC + ts.tv_nsec / 1000;
 }
 
-static void warn_line(const char *fmt, ...)
+void warn_line(const char *fmt, ...)
 {
     va_list ap;
     char buf[256];
@@ -181,7 +172,8 @@ static const char *type_name(uint8_t t)
 {
     static const char *n[] = {
         "?", "READ", "WRITE", "BATCH", "CLAIM", "RELEASE", "MAILBOX",
-        "STATS", "TRACE", "TSFIFO_SUB", "BER_WINDOW", "DFU",
+        "STATS", "TRACE", "TSFIFO_SUB", "BER_WINDOW", "DFU", "RESET",
+        "TSFIFO_UNSUB",
     };
     return t < sizeof(n) / sizeof(n[0]) ? n[t] : "?";
 }
@@ -309,7 +301,7 @@ static int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
     return 0;
 }
 
-static int spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
+int spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
 {
     uint8_t tx0[SPI_BUF_MAX], rx0[SPI_BUF_MAX];
     uint8_t tx1[SPI_BUF_MAX], rx1[SPI_BUF_MAX];
@@ -386,7 +378,7 @@ static int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
     return 0;
 }
 
-static int spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
+int spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
 {
     (void)slice;
     if (mmd == LAN80XX_MMD_GLOBAL && reg == MB_FLAG) {
@@ -418,7 +410,7 @@ static int spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
 }
 #endif  /* SPIPROXY_FUZZ */
 
-static void trace_add(client_t *c, const struct spiproxy_op *op)
+void trace_add(client_t *c, const struct spiproxy_op *op)
 {
     trace_ent_t *e = &g.ring[g.ring_w++ % TRACE_RING];
     e->ts = now_us();
@@ -522,6 +514,9 @@ static int exec_op(client_t *c, struct spiproxy_op *op)
         op->reg >= MB_GUARD_LO && op->reg <= MB_GUARD_HI &&
         c != NULL) {
         return SPIPROXY_EBUSY; /* mailbox region while a MB tx is in flight */
+    }
+    if (tsf_fenced(op)) {
+        return SPIPROXY_EBUSY; /* subscribed TS FIFO: only the drainer pops */
     }
     int rc = op->write ? spi_write_reg(op->slice, op->mmd, op->reg, op->val)
                        : spi_read_reg(op->slice, op->mmd, op->reg, &op->val);
@@ -715,6 +710,31 @@ static void send_resp(client_t *c, const struct spiproxy_hdr *req,
     }
     log_debug("C%u(%s) seq=%u RSP %s st=%s len=%u", c->id, c->comm, req->seq,
              type_name(req->type), status_name(status), blen);
+}
+
+/* Unsolicited message (seq = 0) to a subscriber.
+ * Returns -1 when it could not be queued on the socket (client gone or not reading).
+ */
+int send_push(client_t *c, uint8_t type, const void *body, uint32_t blen)
+{
+    uint8_t msg[sizeof(struct spiproxy_hdr) + SPIPROXY_MSG_MAX];
+    struct spiproxy_hdr *h = (struct spiproxy_hdr *)msg;
+
+    h->ver = SPIPROXY_VER;
+    h->type = type | SPIPROXY_RESP;
+    h->flags = SPIPROXY_OK;
+    h->seq = 0;
+    h->len = blen;
+    if (blen) {
+        memcpy(msg + sizeof(*h), body, blen);
+    }
+    if (send(c->fd, msg, sizeof(*h) + blen, MSG_DONTWAIT | MSG_NOSIGNAL) < 0) {
+        c->n_err++;
+        return -1;
+    }
+    log_debug("C%u(%s) seq=0 PUSH %s len=%u", c->id, c->comm, type_name(type),
+              blen);
+    return 0;
 }
 
 static void claim_end(int abnormal)
@@ -928,6 +948,7 @@ static void exec_item(qitem_t *it)
                                 (unsigned long long)g.cl[i].n_err);
             }
         }
+        len += tsf_stats(txt + len, sizeof(txt) - len);
         send_resp(c, h, SPIPROXY_OK, txt, (uint32_t)len);
         return;
     }
@@ -970,6 +991,34 @@ static void exec_item(qitem_t *it)
         log_debug("C%u(%s) seq=%u RESET hw assert=%uus deassert=%uus", c->id,
                  c->comm, h->seq, a, d);
         send_resp(c, h, SPIPROXY_OK, NULL, 0);
+        /* the TSU configuration is gone: tell each subscriber once */
+        for (i = 0; i < MAX_CLIENTS; i++) {
+            for (n = 0; n < SLICE_COUNT; n++) {
+                if (g.cl[i].used && tsf_subscriber((uint8_t)n) == &g.cl[i]) {
+                    send_push(&g.cl[i], SPIPROXY_RESET, NULL, 0);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    case SPIPROXY_TSFIFO_SUB:
+    case SPIPROXY_TSFIFO_UNSUB: {
+        struct spiproxy_tsfifo_sub *rq = (struct spiproxy_tsfifo_sub *)it->body;
+
+        if (h->len != sizeof(*rq) || rq->slice >= SLICE_COUNT) {
+            send_resp(c, h, SPIPROXY_EINVAL, NULL, 0);
+            return;
+        }
+        if (h->type == SPIPROXY_TSFIFO_SUB) {
+            st = tsf_subscribe(c, rq);
+        } else if (tsf_subscriber(rq->slice) == c) {
+            tsf_unsubscribe(rq->slice);
+            st = SPIPROXY_OK;
+        } else {
+            st = SPIPROXY_EINVAL;   /* not this client's subscription */
+        }
+        send_resp(c, h, st, NULL, 0);
         return;
     }
     default:
@@ -997,6 +1046,8 @@ static void drain_queues(int budget)
 
     while (budget--) {
         qitem_t *it = NULL, **pp = NULL;
+
+        tsf_tick();   /* PTP first: drain the due TS FIFOs between ops */
         for (q = 0; q < 3 && it == NULL; q++) {
             for (pp = &g.qh[q]; *pp; pp = &(*pp)->next) {
                 if (item_eligible(*pp)) {
@@ -1057,6 +1108,11 @@ static void client_drop(client_t *c)
 
     if (g.claim_owner == c) {
         claim_end(1); /* abnormal: run the cleanup ops */
+    }
+    for (q = 0; q < SLICE_COUNT; q++) {
+        if (tsf_subscriber((uint8_t)q) == c) {
+            tsf_unsubscribe((uint8_t)q);
+        }
     }
     for (q = 0; q < 3; q++) {
         for (pp = &g.qh[q]; *pp;) {
@@ -1256,6 +1312,10 @@ int main(int argc, char **argv)
 
     while (!g.stop) {
         int timeout = g.n_queued ? 0 : (g.claim_owner ? 100 : -1);
+        int tsf = tsf_timeout_ms();
+        if (tsf >= 0 && (timeout < 0 || tsf < timeout)) {
+            timeout = tsf;
+        }
         int n = epoll_wait(g.ep_fd, evs, 8, timeout);
         for (i = 0; i < n; i++) {
             if (evs[i].data.ptr == NULL) {

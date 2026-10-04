@@ -15,7 +15,7 @@ if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
 endif()
 
 # Harnesses (SPIPROXY_FUZZ drops main + stubs hardware). fuzz_msg and fuzz_frame
-# #include lan80xx_spid.c -- the request handlers via the scheduler, and the
+# #include the daemon sources -- the request handlers via the scheduler, and the
 # transport parse (client_frame); fuzz_resp #includes spiproxy_cli.c -- the CLI
 # response parse (parse_resp). Need clang for -fsanitize=fuzzer.
 foreach(harness fuzz_msg fuzz_frame fuzz_resp)
@@ -71,10 +71,11 @@ if(SPIPROXY_FUZZ_COVERAGE)
         COMMAND ${LLVM_COV} report $<TARGET_FILE:fuzz_msg>
                 -instr-profile=fuzz_msg.profdata
                 "${CMAKE_CURRENT_SOURCE_DIR}/lan80xx_spid.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ts_fifo.c"
         DEPENDS fuzz_profdata
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         USES_TERMINAL VERBATIM
-        COMMENT "llvm-cov summary for lan80xx_spid.c")
+        COMMENT "llvm-cov summary for the daemon sources")
 
     # Annotated line-by-line HTML.
     add_custom_target(fuzz_coverage_html
@@ -82,12 +83,13 @@ if(SPIPROXY_FUZZ_COVERAGE)
                 -instr-profile=fuzz_msg.profdata -format=html
                 -output-dir=${CMAKE_CURRENT_BINARY_DIR}/coverage-html
                 "${CMAKE_CURRENT_SOURCE_DIR}/lan80xx_spid.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ts_fifo.c"
         COMMAND ${CMAKE_COMMAND} -E echo
                 "HTML report: ${CMAKE_CURRENT_BINARY_DIR}/coverage-html/index.html"
         DEPENDS fuzz_profdata
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         USES_TERMINAL VERBATIM
-        COMMENT "llvm-cov HTML report for lan80xx_spid.c")
+        COMMENT "llvm-cov HTML report for the daemon sources")
     set_target_properties(fuzz_profdata fuzz_coverage fuzz_coverage_html
                           PROPERTIES FOLDER fuzz)
 endif()

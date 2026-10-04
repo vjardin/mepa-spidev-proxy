@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Vincent Jardin, Vincent Cruz, Free Mobile
 // SPDX-License-Identifier: BSD-4-Clause
 //
-// Shared setup for the lan80xx-spid fuzz harnesses. Include AFTER
-// #include "lan80xx_spid.c" (it uses the daemon's static globals/types).
+// Shared setup for the lan80xx-spid fuzz harnesses. Include AFTER the
+// daemon's sources (it uses their static globals/types).
 // Each harness is its own binary, so the non-static LLVMFuzzerInitialize
 // defined here is linked exactly once.
 
@@ -47,6 +47,7 @@ static void fuzz_reset(void)
     memset(g.page_owner, 0, sizeof(g.page_owner));
     memset(g.cor_last, 0, sizeof(g.cor_last));
     memset(g.rd_ring, 0, sizeof(g.rd_ring));
+    memset(g_tsf, 0, sizeof(g_tsf));
     for (i = 0; i < MAX_QITEMS - 1; i++) {
         g.pool[i].next = &g.pool[i + 1];
     }
