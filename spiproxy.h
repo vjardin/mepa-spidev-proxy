@@ -7,6 +7,8 @@
 // header + body.
 // Responses echo `seq` with type | SPIPROXY_RESP and the status code in
 // hdr.flags.
+// Unsolicited messages (TS FIFO subscription pushes, the reset notice
+// to subscribers) have seq = 0.
 
 #ifndef SPIPROXY_H
 #define SPIPROXY_H
@@ -28,10 +30,11 @@ enum spiproxy_type {
     SPIPROXY_MAILBOX,    /* body: spiproxy_mb [+ payload]                */
     SPIPROXY_STATS,      /* body: empty; response body: text             */
     SPIPROXY_TRACE,      /* body: empty; response body: text (op ring)   */
-    SPIPROXY_TSFIFO_SUB, /* reserved, ENOSYS in this version             */
+    SPIPROXY_TSFIFO_SUB, /* body: spiproxy_tsfifo_sub; pushes, see below */
     SPIPROXY_BER_WINDOW, /* reserved, ENOSYS in this version             */
     SPIPROXY_DFU,        /* reserved,  ENOSYS in this version            */
     SPIPROXY_RESET,      /* body: spiproxy_reset; pulse the HW reset GPIO */
+    SPIPROXY_TSFIFO_UNSUB, /* body: spiproxy_tsfifo_sub (period ignored)  */
 };
 #define SPIPROXY_RESP 0x80
 
@@ -99,6 +102,44 @@ struct spiproxy_mb {
 struct spiproxy_reset {
     uint32_t assert_us;
     uint32_t deassert_us;
+};
+
+/*
+ * Egress (H2L) timestamp FIFO of one slice, drained by the daemon.
+ *
+ * TSFIFO_SUB subscribes the client to the FIFO of slice:
+ * the daemon polls it every period_us, then it pops every complete row
+ * and it pushes the entries to the client.
+ */
+#define SPIPROXY_TSFIFO_ENTRY_LEN 39   /* bytes of one FIFO row / entry      */
+#define SPIPROXY_TSFIFO_ROWS      16   /* FIFO depth: max entries per push   */
+#define SPIPROXY_TSFIFO_PERIOD_US 5000 /* default drain period               */
+
+struct spiproxy_tsfifo_sub {
+    uint8_t  slice;      /* 0..3                                         */
+    uint8_t  rsvd[3];
+    uint32_t period_us;  /* 0 = default; clamped to 1000..1000000        */
+};
+
+/*
+ * Push: type = SPIPROXY_TSFIFO_SUB | SPIPROXY_RESP, seq = 0, status OK,
+ * body = this header + nentries x SPIPROXY_TSFIFO_ENTRY_LEN bytes.
+ * Entry bytes, in the order of MEPA's lan80xx_phy_ts_fifo_empty_priv():
+ *   [0]      sub-nanoseconds
+ *   [1..4]   nanoseconds, little endian
+ *   [5..8]   seconds[31:0], little endian
+ *   [9..10]  seconds[47:32], little endian
+ *   [11..38] signature, as selected by the egress signature builder
+ *            (MEPA default: [11..12] sequenceId, [13..22] sourcePortIdentity
+ *            byte-reversed, [23] domainNumber, [24] messageType in bits 3:0)
+ */
+struct spiproxy_tsfifo_evt {
+    uint8_t  slice;
+    uint8_t  nentries;
+    uint16_t rsvd;
+    uint32_t drop_cnt;   /* EGR_TS_FIFO_DROP_CNT, refreshed every second  */
+    uint32_t mono_us;    /* CLOCK_MONOTONIC in us when the rows were read,
+                            modulo 2^32 (wraps every ~71 min)           */
 };
 
 #endif /* SPIPROXY_H */

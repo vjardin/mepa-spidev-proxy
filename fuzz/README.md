@@ -10,7 +10,7 @@ Three libFuzzer harnesses cover the surfaces that consume untrusted input:
 - `fuzz_resp` — the CLI's response parse: `parse_resp()`, which bounds how much
   of a daemon response is copied out (a malformed response must not over-read).
 
-`fuzz_msg`/`fuzz_frame` `#include` `lan80xx_spid.c`; `fuzz_resp` `#include`s
+`fuzz_msg`/`fuzz_frame` `#include` the daemon's sources; `fuzz_resp` `#include`s
 `spiproxy_cli.c`. All build with `-DSPIPROXY_FUZZ`, which:
 - drops `main()` (libFuzzer provides its own), and
 - swaps the SPI backend (`spi_read_reg`/`spi_write_reg`) for hardware-free
