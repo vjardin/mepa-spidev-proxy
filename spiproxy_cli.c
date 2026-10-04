@@ -10,6 +10,7 @@
 //   spiproxy-cli [-s sock] claimtest <ms>         # claim, read, hold, release
 //   spiproxy-cli [-s sock] [-t ms] mailbox <cmd> [hexbytes]  # -t: MB timeout
 //   spiproxy-cli [-s sock] reset [assert_us [deassert_us]]  # HW reset pulse
+//   spiproxy-cli [-s sock] tsfifo <slice> [period_us [count]]  # TS FIFO pushes
 //   spiproxy-cli [-s sock] stats | trace
 
 #define _GNU_SOURCE
@@ -306,6 +307,80 @@ int main(int argc, char **argv)
             printf("\n");
         }
         return st != SPIPROXY_OK;
+    }
+    if (!strcmp(argv[0], "tsfifo") && argc >= 2 && argc <= 4) {
+        /* Subscribe to a slice's egress TS FIFO and print each entry;
+         * count = 0 (default) runs until interrupted, which unsubscribes. */
+        struct spiproxy_tsfifo_sub rq = { 0 };
+        struct spiproxy_tsfifo_evt ev;
+        struct spiproxy_hdr h;
+        uint8_t msg[sizeof(struct spiproxy_hdr) + SPIPROXY_MSG_MAX];
+        unsigned long count = 0, got = 0;
+        ssize_t n;
+        int i, b;
+
+        if (!parse_uint(argv[1], 0, 0, 3, &v)) return EXIT_FAILURE;
+        rq.slice = (uint8_t)v;
+        if (argc >= 3) {
+            if (!parse_uint(argv[2], 0, 0, 0xffffffff, &v)) return EXIT_FAILURE;
+            rq.period_us = (uint32_t)v;
+        }
+        if (argc == 4 && !parse_uint(argv[3], 0, 0, 0xffffffff, &count)) {
+            return EXIT_FAILURE;
+        }
+        st = xfer(SPIPROXY_TSFIFO_SUB, SPIPROXY_PRIO_HIGH, &rq, sizeof(rq),
+                  NULL, NULL);
+        printf("tsfifo slice %u: subscribe status=%d\n", rq.slice, st);
+        if (st != SPIPROXY_OK) {
+            return EXIT_FAILURE;
+        }
+        while (count == 0 || got < count) {
+            n = recv(sock_fd, msg, sizeof(msg), 0);
+            if (n <= 0) {
+                perror("recv");
+                return EXIT_FAILURE;
+            }
+            if ((size_t)n < sizeof(h)) {
+                continue;
+            }
+            memcpy(&h, msg, sizeof(h));
+            if (h.seq != 0 || h.len != (uint32_t)n - sizeof(h)) {
+                continue;
+            }
+            if (h.type == (SPIPROXY_RESET | SPIPROXY_RESP)) {
+                printf("PHY reset: the TSU configuration is lost\n");
+                continue;
+            }
+            if (h.type != (SPIPROXY_TSFIFO_SUB | SPIPROXY_RESP) ||
+                h.len < sizeof(ev)) {
+                continue;
+            }
+            memcpy(&ev, msg + sizeof(h), sizeof(ev));
+            if (h.len != sizeof(ev) + (uint32_t)ev.nentries * SPIPROXY_TSFIFO_ENTRY_LEN) {
+                continue;
+            }
+            for (i = 0; i < ev.nentries; i++) {
+                const uint8_t *e = msg + sizeof(h) + sizeof(ev) +
+                                   (size_t)i * SPIPROXY_TSFIFO_ENTRY_LEN;
+                uint64_t sec = (uint64_t)e[5] | (uint64_t)e[6] << 8 |
+                               (uint64_t)e[7] << 16 | (uint64_t)e[8] << 24 |
+                               (uint64_t)e[9] << 32 | (uint64_t)e[10] << 40;
+                uint32_t ns = (uint32_t)e[1] | (uint32_t)e[2] << 8 |
+                              (uint32_t)e[3] << 16 | (uint32_t)e[4] << 24;
+
+                printf("s%u %llu.%09u +%u/256ns seq=%u type=%u domain=%u drop=%u t=%uus sig=",
+                       ev.slice, (unsigned long long)sec, ns, e[0],
+                       (unsigned)(e[11] | e[12] << 8), e[24] & 0xfu, e[23],
+                       ev.drop_cnt, ev.mono_us);
+                for (b = 11; b < SPIPROXY_TSFIFO_ENTRY_LEN; b++) {
+                    printf("%02x", e[b]);
+                }
+                printf("\n");
+                got++;
+            }
+            fflush(stdout);
+        }
+        return EXIT_SUCCESS;
     }
     if (!strcmp(argv[0], "stats") || !strcmp(argv[0], "trace")) {
         char txt[SPIPROXY_MSG_MAX + 1];
