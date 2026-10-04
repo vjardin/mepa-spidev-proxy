@@ -32,7 +32,10 @@ jobs:
           sparse-checkout: mepa/microchip/lan80xx/src
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.cc }} -DMESA_ROOT_DIR="$PWD/mesa"
+        run: cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.cc }} -DMESA_ROOT_DIR="$PWD/mesa" -DSPIPROXY_TESTS=ON
 
       - name: Build
         run: cmake --build build -j "$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
