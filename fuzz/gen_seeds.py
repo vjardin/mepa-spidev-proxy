@@ -32,7 +32,7 @@ import sys
 VER = 1
 # enum spiproxy_type
 READ, WRITE, BATCH, CLAIM, RELEASE, MAILBOX, STATS, TRACE = 1, 2, 3, 4, 5, 6, 7, 8
-RESET = 12
+TSFIFO_SUB, RESET, TSFIFO_UNSUB = 9, 12, 13
 
 
 def hdr(msg_type: int, body: bytes) -> bytes:
@@ -92,9 +92,20 @@ def seeds() -> dict[str, bytes]:
         "stats":   one(STATS, b""),
         "trace":   one(TRACE, b""),
         "reset":   one(RESET, struct.pack("<II", 10000, 100000)),
+        # TS FIFO: subscribe slice 1; the feed holds one complete row (2R
+        # confirm + TSFIFO_0..9) then empty, so the drain runs to a push.
+        "tsfifo_sub": one(TSFIFO_SUB, struct.pack("<BBBBI", 1, 0, 0, 0, 0),
+                          feed=struct.pack("<II", 0x78000000, 0x78000000)
+                          + struct.pack("<I", 0x78000000) + bytes(36)
+                          + struct.pack("<I", 0x80000000)),
         # stateful sequences (exercise the queue + claim gating)
         "claim_seq":   make([(0, hdr(CLAIM, claim)), (0, hdr(READ, rd)), (0, rel)]),
         "cross_claim": make([(0, hdr(CLAIM, claim)), (1, hdr(READ, rd)), (0, rel)]),
+        # a FIFO row read by another client while the slice is subscribed
+        # hits the TS FIFO fence; then the subscriber leaves
+        "tsfifo_fence": make([(0, hdr(TSFIFO_SUB, struct.pack("<BBBBI", 1, 0, 0, 0, 0))),
+                              (1, hdr(READ, op(1, 0, 0x0A, 0x9075, 0))),
+                              (0, hdr(TSFIFO_UNSUB, struct.pack("<BBBBI", 1, 0, 0, 0, 0)))]),
         # a foreign op to the guarded MB region queued behind a mailbox tx: it
         # is dispatched during the mailbox poll and hits the in-flight guard.
         "mb_guard":    make([(0, hdr(MAILBOX, mb)),

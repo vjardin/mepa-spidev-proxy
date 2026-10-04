@@ -12,7 +12,9 @@ type_release="\x05"
 type_mailbox="\x06"
 type_stats="\x07"
 type_trace="\x08"
+type_tsfifo_sub="\x09"
 type_reset="\x0c"
+type_tsfifo_unsub="\x0d"
 
 # GLOBAL MMD -- the mailbox and its guarded register window live here
 mmd_global="\x1e"
@@ -32,3 +34,12 @@ mb_flag_resp="\x02\x00\x00\x00"
 # SPI_FAIL_MAGIC (u32 LE 0xE770FA11): a feed word that injects a read failure,
 # driving the I/O-error / mailbox-abort cleanup paths.
 spi_fail="\x11\xfa\x70\xe7"
+
+# TS FIFO: PTP MMD, the row registers (u16 LE 0x9070 / 0x9079, the read of
+# TSFIFO_9 pops a row) and the TSFIFO_0 words for a complete row (flags 15)
+# and an empty FIFO (u32 LE)
+mmd_ptp="\x0a"
+reg_tsfifo_row0="\x70\x90"
+reg_tsfifo_row9="\x79\x90"
+tsf_row_full="\x00\x00\x00\x78"
+tsf_empty="\x00\x00\x00\x80"
