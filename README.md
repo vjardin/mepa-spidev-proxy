@@ -120,7 +120,7 @@ spiproxy-cli read  <slice> <mmd> <reg>
 spiproxy-cli write <slice> <mmd> <reg> <val>
 spiproxy-cli bench <n>            # proxied read round-trip stats
 spiproxy-cli hammer <seconds>     # low-priority read flood
-spiproxy-cli claimtest <ms>       # claim, read, hold, release
+spiproxy-cli claimtest <ms> [hold_ms]  # claim, read, hold (200 ms), release
 spiproxy-cli tsfifo <slice> [period_us [count]]  # print the TS FIFO pushes
 ```
 
