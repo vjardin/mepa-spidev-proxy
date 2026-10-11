@@ -7,7 +7,7 @@
 //   spiproxy-cli [-s sock] write <slice> <mmd> <reg> <val>
 //   spiproxy-cli [-s sock] bench <n>              # proxied read RTT stats
 //   spiproxy-cli [-s sock] hammer <seconds>       # low-prio read flood
-//   spiproxy-cli [-s sock] claimtest <ms>         # claim, read, hold, release
+//   spiproxy-cli [-s sock] claimtest <ms> [hold_ms]  # claim, read, hold (200 ms), release
 //   spiproxy-cli [-s sock] [-t ms] mailbox <cmd> [hexbytes]  # -t: MB timeout
 //   spiproxy-cli [-s sock] reset [assert_us [deassert_us]]  # HW reset pulse
 //   spiproxy-cli [-s sock] tsfifo <slice> [period_us [count]]  # TS FIFO pushes
@@ -246,7 +246,8 @@ int main(int argc, char **argv)
                (unsigned long long)cnt, op.val);
         return EXIT_SUCCESS;
     }
-    if (!strcmp(argv[0], "claimtest") && argc == 2) {
+    if (!strcmp(argv[0], "claimtest") && (argc == 2 || argc == 3)) {
+        unsigned long hold_ms = 200;
         struct {
             struct spiproxy_claim cl;
             struct spiproxy_op cleanup[1];
@@ -259,6 +260,14 @@ int main(int argc, char **argv)
         };
         if (!parse_uint(argv[1], 10, 0, 0xffffffff, &v)) return EXIT_FAILURE;
         req.cl.max_ms = (uint32_t)v;
+        if (argc == 3) {
+            if (!parse_uint(argv[2], 10, 0, 0xffffffff, &hold_ms)) return EXIT_FAILURE;
+            if (hold_ms > v) {
+                fprintf(stderr, "claimtest: hold %lu ms capped to the lease ceiling %lu ms\n",
+                        hold_ms, v);
+                hold_ms = v;   /* the daemon expires the claim at max_ms anyway */
+            }
+        }
         st = xfer(SPIPROXY_CLAIM, 0, &req, sizeof(req), NULL, NULL);
         printf("claim: status=%d\n", st);
         if (st != SPIPROXY_OK) {
@@ -269,7 +278,7 @@ int main(int argc, char **argv)
         rlen = sizeof(op);
         st = xfer(SPIPROXY_READ, 0, &op, sizeof(op), &op, &rlen);
         printf("read under claim: status=%d val=0x%08x\n", st, op.val);
-        usleep(200000);
+        usleep((useconds_t)hold_ms * 1000);
         st = xfer(SPIPROXY_RELEASE, 0, NULL, 0, NULL, NULL);
         printf("release: status=%d\n", st);
         return EXIT_SUCCESS;
