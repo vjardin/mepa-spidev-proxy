@@ -1302,6 +1302,16 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     ioctl(g.spi_fd, SPI_IOC_WR_MODE, &mode);
+    {
+        uint32_t hz = (uint32_t)g.freq, rd = 0;
+
+        if (ioctl(g.spi_fd, SPI_IOC_WR_MAX_SPEED_HZ, &hz)) {
+            log_warn("SPI_IOC_WR_MAX_SPEED_HZ %u: %s (the DT spi-max-frequency stays)", hz, strerror(errno));
+        } else {
+            (void)ioctl(g.spi_fd, SPI_IOC_RD_MAX_SPEED_HZ, &rd);
+            log_always("SPI clock %u Hz requested (%u accepted; the controller takes its nearest divider at or below)", hz, rd);
+        }
+    }
     /* startup sanity: DEVICE_ID must answer on slice 0 */
     if (spi_read_reg(0, LAN80XX_MMD_GLOBAL, LAN80XX_MCU_IO_MNGT_MISC_DEVICE_ID_REG, &id) || (id & 0xff00) != 0x8000) {
         log_warn("DEVICE_ID read %#x -- PHY not answering?", id);
