@@ -33,7 +33,8 @@ static struct tsf_slice {
     uint32_t  period_us;
     uint64_t  next_us;
     uint64_t  drop_next_us;
-    uint32_t  drop_cnt;
+    uint32_t  drop_cnt;         /* the chip's EGR_TSFIFO_DROP_CNT, last read */
+    uint32_t  drop_at_sub;      /* ... as found at the subscription */
     uint64_t  n_entries, n_flushed, n_push_err;
 } g_tsf[SLICE_COUNT];
 
@@ -82,6 +83,7 @@ static int tsf_rd(uint8_t slice, uint16_t reg, uint32_t *val)
 int tsf_subscribe(client_t *c, const struct spiproxy_tsfifo_sub *rq)
 {
     uint32_t p = rq->period_us ? rq->period_us : SPIPROXY_TSFIFO_PERIOD_US;
+    uint32_t d = 0;
     uint64_t now = now_us();
 
     if (g_tsf[rq->slice].sub != NULL && g_tsf[rq->slice].sub != c) {
@@ -94,11 +96,16 @@ int tsf_subscribe(client_t *c, const struct spiproxy_tsfifo_sub *rq)
     }
     memset(&g_tsf[rq->slice], 0, sizeof(g_tsf[rq->slice]));
     g_tsf[rq->slice].sub = c;
+    if (tsf_rd(rq->slice, TSF_REG_DROP, &d)) {
+        d = 0;
+    }
+    g_tsf[rq->slice].drop_cnt = d;
+    g_tsf[rq->slice].drop_at_sub = d;
     g_tsf[rq->slice].period_us = p;
     g_tsf[rq->slice].next_us = now;     /* first drain right after the reply */
     g_tsf[rq->slice].drop_next_us = now + TSF_DROP_POLL_US;
-    log_always("client %u subscribed to the TS FIFO of slice %u, every %u us",
-               c->id, rq->slice, p);
+    log_always("client %u subscribed to the TS FIFO of slice %u, every %u us, EGR_TSFIFO_DROP_CNT %u as found",
+               c->id, rq->slice, p, d);
     return SPIPROXY_OK;
 }
 
@@ -243,13 +250,13 @@ int tsf_stats(char *buf, size_t len)
     for (int i = 0; i < SLICE_COUNT; i++) {
         if (g_tsf[i].sub != NULL) {
             n += snprintf(buf + n, len - n,
-                          "tsfifo s%d client %u(%s) period=%uus entries=%llu flushed=%llu push_err=%llu drop_cnt=%u\n",
+                          "tsfifo s%d client %u(%s) period=%uus entries=%llu flushed=%llu push_err=%llu drop_cnt=%u drop_since_sub=%u\n",
                           i, g_tsf[i].sub->id, g_tsf[i].sub->comm,
                           g_tsf[i].period_us,
                           (unsigned long long)g_tsf[i].n_entries,
                           (unsigned long long)g_tsf[i].n_flushed,
                           (unsigned long long)g_tsf[i].n_push_err,
-                          g_tsf[i].drop_cnt);
+                          g_tsf[i].drop_cnt, g_tsf[i].drop_cnt - g_tsf[i].drop_at_sub);
         }
     }
     return n;

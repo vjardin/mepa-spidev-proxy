@@ -134,6 +134,8 @@ Reading `TSFIFO_9` pops a row, so the FIFO can have one reader only.
   `period_us` (default 5 ms, 1 ms .. 1 s)
 - Each poll that finds rows sends one push (`seq` = 0) with up to 16 entries
   and the `EGR_TSFIFO_DROP_CNT` value, see `spiproxy.h`.
+- `STATS` shows the chip's drop counter as `drop_cnt=` and `drop_since_sub=`, its
+  increment since the subscription.
 - After a hardware `RESET`, subscribers get a reset notice: the TSU
   configuration is gone and must be programmed again.
 - The drain runs between any two queued operations, during a mailbox wait and
