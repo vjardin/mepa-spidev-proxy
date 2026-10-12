@@ -85,7 +85,7 @@ install(FILES spiproxy.h
 install(TARGETS spiproxy EXPORT mepa_spidev_proxyTargets)
 
 # the spi proxy daemon + debug CLI
-add_executable(lan80xx_spid lan80xx_spid.c ts_fifo.c log.c parse.c)
+add_executable(lan80xx_spid lan80xx_spid.c ts_fifo.c irq.c log.c parse.c)
 add_dependencies(lan80xx_spid gen_lan80xx_regs)
 target_include_directories(lan80xx_spid PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 set_target_properties(lan80xx_spid PROPERTIES OUTPUT_NAME "lan80xx-spid")

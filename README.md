@@ -40,6 +40,7 @@ The clients get:
 |-----------------|-------------------|--------------------------------------------------|
 | `lan80xx-spid`  | `lan80xx_spid.c`  | The daemon: owns `/dev/spidev`, serializes access|
 |                 | `ts_fifo.c`       | Its egress timestamp FIFO service                |
+|                 | `irq.c`           | Its LAN80xx pin interrupt, for the TS FIFO drain |
 | `spiproxy-cli`  | `spiproxy_cli.c`  | Debug CLI client                                 |
 | (shared header) | `spiproxy.h`      | Wire protocol contract (12-byte header + ops)    |
 
@@ -110,9 +111,17 @@ the same way, or just links `spiproxy.h`'s protocol directly.
 lan80xx-spid -d /dev/spidev1.0 -f 10000000 -r lan8023-rst
 ```
 
-Daemon flags (`-h` for the full list): `-d` spidev node (required), `-s`
-socket path, `-p` SPI read padding bytes, `-f` SPI clock in Hz (default 5 MHz),
-`-r` reset GPIO line name, `-L` event log file.
+Daemon flags (`-h` for the full list):
+  `-d` spidev node (required),
+  `-s` socket path,
+  `-p` SPI read padding bytes,
+  `-f` SPI clock in Hz (default 5 MHz),
+  `-r` reset GPIO line name,
+  `-L` event log file,
+  `-i none|auto|only` TS FIFO drain by interrupt (default `none`),
+  `-g NAME[:a|:b]` the SoC GPIO line of the PHY interrupt and the chip
+                   pin it is wired to (default `lan8023-mdint:a`),
+  `-w <ms>` the auto mode's polling tail (default 50).
 
 ```sh
 # CLI: point it at the socket with -s if not the default
@@ -141,6 +150,30 @@ Reading `TSFIFO_9` pops a row, so the FIFO can have one reader only.
 - The drain runs between any two queued operations, during a mailbox wait and
   while another client holds a `CLAIM`: PTP comes first.
 - Use a dedicated connection for the subscription.
+
+### FIFO drain trigger (`-i none|auto|only`)
+
+A subscribed TS FIFO must be emptied as soon as a timestamp lands in it:
+the PTP stack waits for that timestamp to send its Follow_Up. The PTP daemon
+can find out about new entries in two ways: by polling the FIFO over SPI
+at a fixed period, or by waiting for the interrupt the PHY raises when a
+FIFO holds an entry.
+
+| Mode   | How entries are found |
+|--------|-----------------------|
+| `none` (default) | poll every subscribed FIFO at the subscription period (5 ms by default) |
+| `only` | wait for the PHY interrupt, drain the FIFO until empty, wait again |
+| `auto` | the interrupt, then after each drain that found entries keep polling at the period until the FIFO has stayed empty for `-w` ms (default 50) |
+
+Both interrupt modes fall back to polling by themselves when the line does
+not work, so `auto` and `only` are safe on a board without the interrupt.
+
+Related options:
+
+  - `-g NAME[:a|:b]`: the CPU's GPIO line that carries the PHY interrupt
+    (`NAME` as in the DTS's `gpio-line-names`) and the chip/LAN802x pin it
+    is wired to, `:a` for `INTR_A` or `:b` for `INTR_B`. Default `lan8023-mdint:a`.
+  - `-w <ms>`: the polling tail of `auto` (default 50).
 
 ```sh
 cmake -B build -S . -DMESA_ROOT_DIR=<mesa> -DSPIPROXY_TESTS=ON

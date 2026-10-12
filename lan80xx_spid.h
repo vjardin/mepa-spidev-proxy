@@ -26,7 +26,9 @@ typedef struct client {
 uint64_t now_us(void);
 void warn_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int  spi_read_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val);
+int  spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val);
 void trace_add(client_t *c, const struct spiproxy_op *op);
 int  send_push(client_t *c, uint8_t type, const void *body, uint32_t blen);
+int  gpio_open_line_by_name(const char *name, uint64_t flags, const char *what);
 
 #endif /* LAN80XX_SPID_H */
