@@ -20,4 +20,8 @@ void tsf_tick(void);
 int  tsf_timeout_ms(void);
 int  tsf_stats(char *buf, size_t len);
 
+/* the interrupt path */
+int  tsf_irq_drain(uint64_t now);
+void tsf_irq_rearm(void);
+
 #endif /* TS_FIFO_H */

@@ -41,6 +41,7 @@
 #include "parse.h"
 #include "lan80xx_spid.h"
 #include "ts_fifo.h"
+#include "irq.h"
 
 #define MAX_CLIENTS    16
 #define MAX_QITEMS     256
@@ -285,7 +286,7 @@ static uint32_t spi_addr(uint8_t slice, uint8_t mmd, uint16_t reg)
            (uint32_t)mmd   << SPI_MMD_SHIFT   | reg;
 }
 
-static int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
+int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
 {
     uint8_t tx[SPI_BUF_MAX], rx[SPI_BUF_MAX];
     struct spi_ioc_transfer tr = {
@@ -368,7 +369,7 @@ static uint32_t fuzz_spi_next(void)
     return v;   /* exhausted feed reads as 0 */
 }
 
-static int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
+int spi_write_reg(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
 {
     (void)slice;
     (void)mmd;
@@ -523,6 +524,9 @@ static int exec_op(client_t *c, struct spiproxy_op *op)
     trace_add(c, op);
     if (rc == 0) {
         lint_op(op);
+        if (op->write) {
+            irq_after_client_write(op);     /* the interrupt pin's registers: verified after a write */
+        }
     }
     if (g.log != NULL) {
         char nb[REG_NAME_BUF];
@@ -771,14 +775,7 @@ static void claim_end(int abnormal)
 }
 
 #ifndef SPIPROXY_FUZZ
-/*
- * Reset GPIO via the kernel GPIO v2 character-device uapi (libc-only,
- * no libgpiod). Resolve the line by NAME (the gpio-line-names entry
- * the board DT assigns, e.g. "lan8023-rst") so the daemon does not
- * hard-code a chip/offset. Requested as output; the line comes up LOW
- * = deasserted (PHY running). Returns the line-request fd or -1.
- */
-static int gpio_open_line_by_name(const char *name)
+int gpio_open_line_by_name(const char *name, uint64_t flags, const char *what)
 {
     char path[sizeof("/dev/gpiochip") + 11];   /* + up to 11 digits of an int */
     int fd = -1;
@@ -803,15 +800,18 @@ static int gpio_open_line_by_name(const char *name)
                 struct gpio_v2_line_request req = {
                     .offsets = { [0] = off },
                     .num_lines = 1,
-                    .config.flags = GPIO_V2_LINE_FLAG_OUTPUT,
+                    .config.flags = flags,
                 };
                 strncpy(req.consumer, "lan80xx-spid",
                         sizeof(req.consumer) - 1);
                 if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &req) == 0 &&
                     req.fd >= 0) {
                     fd = req.fd;
-                    log_always("reset GPIO '%s' = %s line %u",
-                               name, ci.name, off);
+                    log_always("%s GPIO '%s' = %s line %u",
+                               what, name, ci.name, off);
+                } else {
+                    log_error("%s GPIO '%s' = %s line %u: request failed: %s",
+                              what, name, ci.name, off, strerror(errno));
                 }
                 break;
             }
@@ -819,7 +819,7 @@ static int gpio_open_line_by_name(const char *name)
         close(chip);
     }
     if (fd < 0)
-        log_error("reset GPIO '%s' not found on any gpiochip", name);
+        log_error("%s GPIO '%s' not available on any gpiochip", what, name);
     return fd;
 }
 
@@ -923,6 +923,7 @@ static void exec_item(qitem_t *it)
         }
         st = exec_mailbox(c, mb, it->body + sizeof(*mb),
                           resp + sizeof(*mb), &rlen);
+        irq_verify_pin("a mailbox transaction", 0);
         mb->payload_len = rlen;
         memcpy(resp, mb, sizeof(*mb));
         send_resp(c, h, st, resp, sizeof(*mb) + (st == SPIPROXY_OK ? rlen : 0));
@@ -938,6 +939,7 @@ static void exec_item(qitem_t *it)
                        (unsigned long long)g.n_io_err,
                        (unsigned long long)g.n_warns, g.n_queued,
                        g.claim_owner ? g.claim_owner->id : 0, g.mb_inflight);
+        len += irq_stats(txt + len, sizeof(txt) - len);
         for (i = 0; i < MAX_CLIENTS; i++) {
             if (g.cl[i].used) {
                 len += snprintf(txt + len, sizeof(txt) - len,
@@ -991,6 +993,8 @@ static void exec_item(qitem_t *it)
         log_debug("C%u(%s) seq=%u RESET hw assert=%uus deassert=%uus", c->id,
                  c->comm, h->seq, a, d);
         send_resp(c, h, SPIPROXY_OK, NULL, 0);
+        /* the chip is at its defaults: the interrupt pin set up again */
+        irq_verify_pin("the PHY reset", 1);
         /* the TSU configuration is gone: tell each subscriber once */
         for (i = 0; i < MAX_CLIENTS; i++) {
             for (n = 0; n < SLICE_COUNT; n++) {
@@ -1220,7 +1224,11 @@ static void usage(const char *p)
             "      SPIPROXY_RESET op (HW reset pulse); off if absent\n"
             "  -L  full event log to <file> ('-' = stderr): every message,\n"
             "      register op (incl. batch/claim-cleanup/mailbox internals),\n"
-            "      claim + client lifecycle\n", p, SPIPROXY_SOCK);
+            "      claim + client lifecycle\n"
+            "  -i  TS FIFO drain by interrupt: none, auto, only\n"
+            "  -g  CPU GPIO NAME with the LAN80xx pin interrupt (default %s:a = INTR_A)\n"
+            "  -w  auto mode's polling tail in ms (default %u)\n",
+            p, SPIPROXY_SOCK, IRQ_LINE_DEFAULT, IRQ_IDLE_DEFAULT_MS);
 }
 
 #ifndef SPIPROXY_FUZZ
@@ -1231,14 +1239,30 @@ int main(int argc, char **argv)
     uint32_t id = 0;
     int o, i, mode = 0;
     unsigned long v;
+    static int irq_tag;     /* epoll tag of the interrupt line */
 
     g.sock = SPIPROXY_SOCK;
     g.pad = 1;
     g.freq = 5000000;
     g.rst_fd = -1;
-    while ((o = getopt(argc, argv, "d:s:p:f:r:L:h")) != -1) {
+    while ((o = getopt(argc, argv, "d:s:p:f:r:L:i:g:w:h")) != -1) {
         switch (o) {
         case 'd': g.dev = optarg; break;
+        case 'i':
+            if (irq_set_mode(optarg)) {
+                fprintf(stderr, "-i: none, auto or only\n");
+                return EXIT_FAILURE;
+            }
+            break;
+        case 'g':
+            irq_set_line(optarg);
+            break;
+        case 'w':
+            if (!parse_uint(optarg, 10, 1, 60000, &v)) {
+                return EXIT_FAILURE;
+            }
+            irq_set_idle_ms((uint32_t)v);
+            break;
         case 's': g.sock = optarg; break;
         case 'p':
             if (!parse_uint(optarg, 10, 0, SPI_PAD_MAX, &v)) {
@@ -1287,7 +1311,10 @@ int main(int argc, char **argv)
 
     /* Optional HW reset line (-r <line-name>): enables SPIPROXY_RESET. */
     if (g.rst_line)
-        g.rst_fd = gpio_open_line_by_name(g.rst_line);
+        g.rst_fd = gpio_open_line_by_name(g.rst_line, GPIO_V2_LINE_FLAG_OUTPUT, "reset");
+
+    /* The TS FIFO interrupt line (-i auto|only, -g): without it, polling. */
+    irq_open();
 
     strncpy(sa.sun_path, g.sock, sizeof(sa.sun_path) - 1);
     unlink(g.sock);
@@ -1300,6 +1327,10 @@ int main(int argc, char **argv)
     g.ep_fd = epoll_create1(EPOLL_CLOEXEC);
     ev.data.ptr = NULL; /* NULL = listening socket */
     epoll_ctl(g.ep_fd, EPOLL_CTL_ADD, g.srv_fd, &ev);
+    if (irq_fd() >= 0) {
+        struct epoll_event iev = { .events = EPOLLIN, .data.ptr = &irq_tag };   /* &irq_tag = the interrupt line */
+        epoll_ctl(g.ep_fd, EPOLL_CTL_ADD, irq_fd(), &iev);
+    }
     for (i = 0; i < MAX_QITEMS - 1; i++) {
         g.pool[i].next = &g.pool[i + 1];
     }
@@ -1320,6 +1351,8 @@ int main(int argc, char **argv)
         for (i = 0; i < n; i++) {
             if (evs[i].data.ptr == NULL) {
                 accept_client();
+            } else if (evs[i].data.ptr == &irq_tag) {
+                irq_service();
             } else {
                 client_msg(evs[i].data.ptr);
             }
@@ -1331,6 +1364,7 @@ int main(int argc, char **argv)
         }
         drain_queues(64);
     }
+    irq_exit();
     unlink(g.sock);
     log_always("lan80xx-spid: exit");
     log_close();

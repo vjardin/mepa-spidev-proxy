@@ -72,6 +72,7 @@ if(SPIPROXY_FUZZ_COVERAGE)
                 -instr-profile=fuzz_msg.profdata
                 "${CMAKE_CURRENT_SOURCE_DIR}/lan80xx_spid.c"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ts_fifo.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/irq.c"
         DEPENDS fuzz_profdata
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         USES_TERMINAL VERBATIM
@@ -84,6 +85,7 @@ if(SPIPROXY_FUZZ_COVERAGE)
                 -output-dir=${CMAKE_CURRENT_BINARY_DIR}/coverage-html
                 "${CMAKE_CURRENT_SOURCE_DIR}/lan80xx_spid.c"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ts_fifo.c"
+                "${CMAKE_CURRENT_SOURCE_DIR}/irq.c"
         COMMAND ${CMAKE_COMMAND} -E echo
                 "HTML report: ${CMAKE_CURRENT_BINARY_DIR}/coverage-html/index.html"
         DEPENDS fuzz_profdata

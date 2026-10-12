@@ -12,6 +12,7 @@
 
 #include "lan80xx_spid.c"
 #include "ts_fifo.c"
+#include "irq.c"
 
 #include <syslog.h>
 
