@@ -38,7 +38,7 @@ int  irq_active(void);
 uint32_t irq_idle_us(void);
 uint64_t irq_events(void);
 int  irq_line_level(void);
-void irq_slice_arm(uint8_t s, int on);
+int  irq_slice_arm(uint8_t s, int on);
 int  irq_ts_status(uint8_t s, uint32_t *st);
 void irq_ts_ack(uint8_t s);
 void irq_line_held(void);

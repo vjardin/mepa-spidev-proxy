@@ -126,13 +126,17 @@ static int gpio_get(int fd);    /* the interrupt line's level, below */
 static int irq_rd(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t *val)
 {
     struct spiproxy_op op = { .slice = slice, .mmd = mmd, .reg = reg };
-    int rc = spi_read_reg(slice, mmd, reg, val);
+    int rc = spi_read_reg(slice, mmd, reg, &op.val);
 
-    op.val = *val;
     trace_add(NULL, &op);
-    log_debug("C0 seq=0 OP tsfifo-irq R s%u %02x %04x = %08x%s", slice, mmd, reg, *val,
+    log_debug("C0 seq=0 OP tsfifo-irq R s%u %02x %04x = %08x%s", slice, mmd, reg, op.val,
               rc ? " IO-ERR" : "");
-    return rc;
+    if (rc) {
+        io_err_warn("tsfifo-irq", &op);
+        return rc;
+    }
+    *val = op.val;
+    return 0;
 }
 
 static int irq_wr(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
@@ -143,6 +147,9 @@ static int irq_wr(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t val)
     trace_add(NULL, &op);
     log_debug("C0 seq=0 OP tsfifo-irq W s%u %02x %04x = %08x%s", slice, mmd, reg, val,
               rc ? " IO-ERR" : "");
+    if (rc) {
+        io_err_warn("tsfifo-irq", &op);
+    }
     return rc;
 }
 
@@ -157,49 +164,61 @@ static int irq_wrm(uint8_t slice, uint8_t mmd, uint16_t reg, uint32_t set, uint3
     return irq_wr(slice, mmd, reg, (v & ~clr) | set);
 }
 
-/* Clear a slice's TS level and overflow status */
+/* Clear a slice's TS level and overflow status. A failed write leaves the
+ * level set, so no edge comes: the next safety read drains and clears it. */
 void irq_ts_ack(uint8_t s)
 {
-    irq_wr(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_STATUS, IRQ_EGR_TS_LEVEL | IRQ_EGR_TS_OVERFLOW);
+    (void)irq_wr(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_STATUS, IRQ_EGR_TS_LEVEL | IRQ_EGR_TS_OVERFLOW);
 }
 
-static void irq_chip_wide_off(const char *when)
+/* -1 when an access failed */
+static int irq_chip_wide_off(const char *when)
 {
     uint32_t en = 0, st = 0;
+    int err;
 
-    if (irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), &en) || !(en & IRQ_SRC_CHIP_WIDE)) {
-        return;
+    if (irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), &en)) {
+        return -1;
     }
-    irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_STAT + g_irq.pin), &st);
-    irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, IRQ_SRC_CHIP_WIDE);
-    log_warn("INTR_%c: chip-wide sources %#x back on the pin (INTR_STAT %#x) at %s: off again",
-             'A' + (char)g_irq.pin, en & IRQ_SRC_CHIP_WIDE, st, when);
+    if (!(en & IRQ_SRC_CHIP_WIDE)) {
+        return 0;
+    }
+    (void)irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_STAT + g_irq.pin), &st);
+    err = irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, IRQ_SRC_CHIP_WIDE);
+    log_warn("INTR_%c: chip-wide sources %#x back on the pin (INTR_STAT %#x) at %s: %s",
+             'A' + (char)g_irq.pin, en & IRQ_SRC_CHIP_WIDE, st, when,
+             err ? "still on (SPI error)" : "off again");
+    return err;
 }
 
-/* Route a subscribed slice's TS level interrupt to the pin (or undo it). */
-void irq_slice_arm(uint8_t s, int on)
+/* Route a subscribed slice's TS level interrupt to the pin (or undo it);
+ * -1 when an access failed. */
+int irq_slice_arm(uint8_t s, int on)
 {
     const uint32_t src_bit = 1u << (8u + 2u * s + g_irq.pin);
     uint32_t st = 0;
+    int err = 0;
 
     if (g_irq.mode == IRQ_NONE || g_irq.fd < 0 || (!on && !g_irq.armed[s])) {
-        return;
+        return 0;
     }
     if (on) {
-        irq_wrm(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_MASK, IRQ_EGR_TS_LEVEL, 0);
-        irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + g_irq.pin), IRQ_LINE_PTP_TSU_EGR, 0);
-        irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), src_bit, 0);
-        irq_chip_wide_off("the subscription");
+        err |= irq_wrm(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_MASK, IRQ_EGR_TS_LEVEL, 0);
+        err |= irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + g_irq.pin), IRQ_LINE_PTP_TSU_EGR, 0);
+        err |= irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), src_bit, 0);
+        err |= irq_chip_wide_off("the subscription");
         irq_ts_ack(s);
-        irq_rd(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_MASK, &st);
-        log_always("TS FIFO s%u: level interrupt routed to INTR_%c (EGR_INT_MASK %#x, LINE_INTR_EN bit 2, INTR_SRC_EN bit %u)",
-                   s, 'A' + (char)g_irq.pin, st, 8u + 2u * s + g_irq.pin);
+        (void)irq_rd(s, LAN80XX_MMD_PTP, IRQ_REG_EGR_INT_MASK, &st);
+        log_msg(err ? LOG_WARNING : LOG_NOTICE,
+                "TS FIFO s%u: level interrupt routed to INTR_%c (EGR_INT_MASK %#x, LINE_INTR_EN bit 2, INTR_SRC_EN bit %u)%s",
+                s, 'A' + (char)g_irq.pin, st, 8u + 2u * s + g_irq.pin, err ? ": incomplete (SPI error)" : "");
     } else {
-        irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, src_bit);
-        irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + g_irq.pin), 0, IRQ_LINE_PTP_TSU_EGR);
+        err |= irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, src_bit);
+        err |= irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + g_irq.pin), 0, IRQ_LINE_PTP_TSU_EGR);
         /* the 1588 mask bit stays: the PTP daemon's MEPA instance set it too */
     }
     g_irq.armed[s] = on;
+    return err;
 }
 
 /* 1 when the slice is routed and its TS level or overflow status is set */
@@ -221,7 +240,7 @@ int irq_line_level(void)
 void irq_line_held(void)
 {
     g_irq.n_held++;
-    irq_chip_wide_off("a safety read with the line held");
+    (void)irq_chip_wide_off("a safety read with the line held");
 }
 
 /* Entries found by a safety read, not by an interrupt */
@@ -235,9 +254,12 @@ void irq_exit(void)
 {
     for (uint8_t s = 0; s < SLICE_COUNT; s++) {
         if (g_irq.armed[s]) {
-            irq_slice_arm(s, 0);
+            const int err = irq_slice_arm(s, 0);
+
             irq_ts_ack(s);
-            log_always("TS FIFO s%u: un-routed from INTR_%c at exit", s, 'A' + (char)g_irq.pin);
+            log_msg(err ? LOG_WARNING : LOG_NOTICE, "TS FIFO s%u: %s INTR_%c at exit%s", s,
+                    err ? "still routed to" : "un-routed from", 'A' + (char)g_irq.pin,
+                    err ? " (SPI error)" : "");
         }
     }
 }
@@ -259,23 +281,25 @@ static void irq_pin_setup(void)
     const unsigned gpio = IRQ_GPIO_INTR_A + g_irq.pin;
     const uint32_t bit = 1u << (gpio - 32u);
     uint32_t fun = 0, cfg = 0, inv = 0;
+    int err = 0;
 
-    irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_IO_PAD_CTRL + gpio), 0, IRQ_PAD_PUPD_OVR | IRQ_PAD_PUPD_EN);
-    irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_CFG1, bit, 0);
-    irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_OUT_INV1, bit, bit);
-    irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_FUN_SEL1, 0, bit);
-    irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, IRQ_SRC_CHIP_WIDE);
+    err |= irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_IO_PAD_CTRL + gpio), 0, IRQ_PAD_PUPD_OVR | IRQ_PAD_PUPD_EN);
+    err |= irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_CFG1, bit, 0);
+    err |= irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_OUT_INV1, bit, bit);
+    err |= irq_wrm(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_FUN_SEL1, 0, bit);
+    err |= irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + g_irq.pin), 0, IRQ_SRC_CHIP_WIDE);
     for (unsigned p = 0; p < 2; p++) {
         for (uint8_t s = 0; s < SLICE_COUNT; s++) {
-            irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + p), 0, 1u << (8u + 2u * s + p));
-            irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + p), 0, IRQ_LINE_PTP_TSU_EGR);
+            err |= irq_wrm(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_SRC_EN + p), 0, 1u << (8u + 2u * s + p));
+            err |= irq_wrm(s, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_EN + p), 0, IRQ_LINE_PTP_TSU_EGR);
         }
     }
-    irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_FUN_SEL1, &fun);
-    irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_CFG1, &cfg);
-    irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_OUT_INV1, &inv);
-    log_always("TS FIFO interrupt: GPIO%u = INTR_%c as the aggregate interrupt output, inverted = active low (FUN_SEL %#x, CFG %#x, OUT_INV %#x)",
-               gpio, 'A' + (char)g_irq.pin, fun, cfg, inv);
+    (void)irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_FUN_SEL1, &fun);
+    (void)irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_CFG1, &cfg);
+    (void)irq_rd(0, IRQ_MMD_GLOBAL, IRQ_REG_GPIO_OUT_INV1, &inv);
+    log_msg(err ? LOG_WARNING : LOG_NOTICE,
+            "TS FIFO interrupt: GPIO%u = INTR_%c as the aggregate interrupt output, inverted = active low (FUN_SEL %#x, CFG %#x, OUT_INV %#x)%s",
+            gpio, 'A' + (char)g_irq.pin, fun, cfg, inv, err ? ": incomplete (SPI error)" : "");
 }
 
 void irq_verify_pin(const char *why, int full)
@@ -391,12 +415,12 @@ void irq_service(void)
         if (!worked) {
             uint32_t pin_st = 0, l0 = 0, l1 = 0;
 
-            irq_chip_wide_off("an asserted line with no TS FIFO status");
+            (void)irq_chip_wide_off("an asserted line with no TS FIFO status");
             g_irq.n_other_src++;
             if (now - g_irq.other_log_us >= IRQ_OTHER_LOG_US) {
-                irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_STAT + g_irq.pin), &pin_st);
-                irq_rd(0, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_STAT + g_irq.pin), &l0);
-                irq_rd(1, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_STAT + g_irq.pin), &l1);
+                (void)irq_rd(0, IRQ_MMD_GLOBAL, (uint16_t)(IRQ_REG_INTR_STAT + g_irq.pin), &pin_st);
+                (void)irq_rd(0, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_STAT + g_irq.pin), &l0);
+                (void)irq_rd(1, IRQ_MMD_LINE, (uint16_t)(IRQ_REG_LINE_INTR_STAT + g_irq.pin), &l1);
                 warn_line("INTR_%c stays asserted with no TS FIFO status: another source (INTR_STAT %#x, LINE_INTR_STAT s0 %#x s1 %#x; %llu times)",
                           'A' + (char)g_irq.pin, pin_st, l0, l1, (unsigned long long)g_irq.n_other_src);
                 g_irq.other_log_us = now;
