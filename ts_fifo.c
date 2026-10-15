@@ -92,14 +92,29 @@ static int tsf_rd(uint8_t slice, uint16_t reg, uint32_t *val)
 {
     struct spiproxy_op op = { .slice = slice, .mmd = LAN80XX_MMD_PTP,
                               .reg = reg };
-    int rc = spi_read_reg(slice, LAN80XX_MMD_PTP, reg, val);
+    int rc = spi_read_reg(slice, LAN80XX_MMD_PTP, reg, &op.val);
 
-    op.val = *val;
     trace_add(NULL, &op);
     log_debug("C%u seq=0 OP tsfifo R s%u %02x %04x = %08x%s",
               g_tsf[slice].sub ? g_tsf[slice].sub->id : 0, slice,
-              LAN80XX_MMD_PTP, reg, *val, rc ? " IO-ERR" : "");
-    return rc;
+              LAN80XX_MMD_PTP, reg, op.val, rc ? " IO-ERR" : "");
+    if (rc) {
+        io_err_warn("tsfifo", &op);
+        return rc;
+    }
+    *val = op.val;
+    return 0;
+}
+
+/* Route the slice to the pin; when that fails, poll until an edge comes */
+static void tsf_irq_arm(uint8_t s)
+{
+    if (irq_slice_arm(s, 1) == 0) {
+        return;
+    }
+    g_tsf[s].irq_dead = 1;
+    g_tsf[s].polling = 1;
+    warn_line("TS FIFO s%u: interrupt routing failed: polling at the period until an edge comes", s);
 }
 
 int tsf_subscribe(client_t *c, const struct spiproxy_tsfifo_sub *rq)
@@ -130,7 +145,7 @@ int tsf_subscribe(client_t *c, const struct spiproxy_tsfifo_sub *rq)
     g_tsf[rq->slice].first = 1;      /* only: a first drain too, see tsf_tick() */
     g_tsf[rq->slice].last_rows_us = now;
     g_tsf[rq->slice].safety_next_us = now + IRQ_SAFETY_POLL_US;
-    irq_slice_arm(rq->slice, 1);
+    tsf_irq_arm(rq->slice);
     log_always("client %u subscribed to the TS FIFO of slice %u, every %u us (drain: %s%s), EGR_TSFIFO_DROP_CNT %u as found",
                c->id, rq->slice, p, irq_mode_name(irq_mode()),
                (irq_mode() != IRQ_NONE && !irq_active()) ? ", no interrupt line: polling" : "", d);
@@ -139,7 +154,9 @@ int tsf_subscribe(client_t *c, const struct spiproxy_tsfifo_sub *rq)
 
 void tsf_unsubscribe(uint8_t slice)
 {
-    irq_slice_arm(slice, 0);
+    if (irq_slice_arm(slice, 0)) {
+        warn_line("TS FIFO s%u: still routed to the pin after the unsubscription (SPI error)", slice);
+    }
     if (g_tsf[slice].sub != NULL) {
         log_always("client %u unsubscribed from the TS FIFO of slice %u "
                    "(entries %llu, flushed %llu, push errors %llu)",
@@ -454,7 +471,7 @@ void tsf_irq_rearm(void)
 {
     for (uint8_t s = 0; s < SLICE_COUNT; s++) {
         if (g_tsf[s].sub != NULL) {
-            irq_slice_arm(s, 1);
+            tsf_irq_arm(s);
             g_tsf[s].first = 1;      /* entries may wait in the FIFO */
         }
     }

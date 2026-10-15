@@ -61,6 +61,7 @@
 #define SPI_CS_DELAY_SCK 2      /* thd;ssn: CS-high >= 2 SCK periods       */
 #define RST_ASSERT_US    10000  /* default HW-reset assert  (10 ms)      */
 #define RST_DEASSERT_US  100000 /* default HW-reset settle  (100 ms)     */
+#define IO_WARN_US       60000000u /* failed own accesses: one warning a minute */
 
 /* MCU mailbox (MMD 0x1e) */
 #define MB_CMD_ADDR    0xd800
@@ -123,6 +124,7 @@ static struct {
     trace_ent_t ring[TRACE_RING];
     unsigned  ring_w;
     uint64_t  n_reads, n_writes, n_io_err;
+    uint64_t  io_warn_us;       /* the last io_err_warn() */
     /* full event log (-L): every message, register op (including the
      * internals of multi-op operations: batches, claim cleanups, the
      * mailbox protocol traffic), claim lifecycle, client lifecycle.
@@ -421,6 +423,21 @@ void trace_add(client_t *c, const struct spiproxy_op *op)
     e->mmd = op->mmd;
     e->reg = op->reg;
     e->val = op->val;
+}
+
+/* A failed access of the daemon's own (TS FIFO drain, interrupt path) reaches
+ * no client: warned at most once a minute, STATS io_err counts them all. */
+void io_err_warn(const char *tag, const struct spiproxy_op *op)
+{
+    const uint64_t now = now_us();
+
+    if (g.io_warn_us != 0 && now - g.io_warn_us < IO_WARN_US) {
+        return;
+    }
+    g.io_warn_us = now;
+    warn_line("%s: SPI %s s%u %02x %04x failed (%llu I/O errors so far)",
+              tag, op->write ? "write" : "read", op->slice, op->mmd, op->reg,
+              (unsigned long long)g.n_io_err);
 }
 
 /*
